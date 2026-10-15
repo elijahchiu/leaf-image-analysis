@@ -1,0 +1,17 @@
+# Original leaf images
+data/raw/
+
+# Original reports and backups
+archive/
+
+# macOS
+.DS_Store
+
+# R temporary files
+.Rhistory
+.RData
+.Rproj.user/
+*_cache/
+*_files/
+*.knit.md
+*.utf8.md

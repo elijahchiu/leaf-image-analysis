@@ -1,0 +1,484 @@
+---
+title: "Leaf Image Analysis: Feature Extraction & Statistical Analysis"
+author: "Elijah Chiu"
+date: "2026-06-04"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+## Abstract
+This report studies five tree leaf species from the Swedish Leaf dataset using image-based feature extraction. The five species are *Ulmus carpinifolia*, *Salix aurita*, *Quercus*, *Alnus incana*, and *Betula pubescens*, with 75 images per species for a total of 375 leaf images. Following the image-processing steps used in class, each image was converted to grayscale, thresholded to separate the leaf from the background, cleaned by keeping the largest connected component, and filled to create a full binary leaf mask. From this mask, several outline-based features were measured, including area, perimeter, length, width, aspect ratio, circularity, convex hull area, and solidity. HSV color summaries were also computed from the leaf region to add information from the original color images.
+
+The results show that leaf outlines are useful for characterizing and comparing species because they capture differences in size, proportions, compactness, and edge shape, although some overlap still remains across species. Ulmus carpinifolia had the largest average area, Alnus incana had the smallest average area, Salix aurita had the highest average aspect ratio, and Betula pubescens had the lowest average aspect ratio. Color features added another layer of information, with Quercus showing the highest average saturation and Alnus incana showing the lowest average brightness. Overall, this project shows that several image-based features can be used together to characterize and compare tree leaf species, while also showing that outlines alone do not capture everything in the original color images.
+
+## Introduction
+Leaves are one of the most useful parts of a tree for identifying and comparing species. Different species often have leaves that vary in size, shape, compactness, and edge detail. Because of this, leaf images can be measured and compared to study differences between species.
+
+In this project, five species from the Swedish Leaf dataset are analyzed: *Ulmus carpinifolia*, *Salix aurita*, *Quercus*, *Alnus incana*, and *Betula pubescens*. The goal is not to build a prediction model, but to understand how leaf images can be used to describe, characterize, and compare each species and to discuss what information can and cannot be captured from leaf outlines.
+
+The analysis focuses mainly on outline-based features. These include measurements such as area, perimeter, length, width, aspect ratio, circularity, convex hull area, and solidity. These features are useful because they describe the outer shape of the leaf using numbers. HSV color summaries are also included as extra features, since color images contain information that is not present in the binary outline alone.
+
+This report focuses on three main questions: which outline features are most useful for characterizing and comparing the species, how size and shape vary across species, and what extra information HSV color summaries provide beyond the leaf outline.
+
+## Data Description
+The dataset used in this report contains scanned images of tree leaves. Five species were selected for analysis: *Ulmus carpinifolia*, *Salix aurita*, *Quercus*, *Alnus incana*, and *Betula pubescens*. Each species contains 75 images, giving a total of 375 leaf images.
+
+Each image contains one leaf on a light background. In this project, each image is treated as one observation. For each image, both outline-based shape features and color-based features were extracted. The outline features are used as the main basis for characterizing and comparing species, while the color features are used as extra information.
+
+## Feature Extraction Methodology
+The feature extraction process starts by separating the leaf from the background. Each image is read into R, resized to a standard size, and converted to grayscale. Since the leaf is darker than the background, a fixed threshold is used to separate the leaf pixels from the background pixels.
+
+After thresholding, connected-component labeling is used to find separate dark regions in the image. The largest connected component is kept because it represents the leaf. Hole filling is then applied to create a full binary mask of the leaf. This binary mask is used to calculate the outline-based features.
+
+Several outline features are computed from the leaf mask. Area is the total number of pixels inside the leaf. Perimeter measures the boundary length of the leaf using a 4-neighborhood definition. Length and width are computed using the major and minor axes of the leaf pixel coordinates. Aspect ratio is calculated as length divided by width, so larger values mean a more elongated leaf. Circularity is calculated using area and perimeter, with lower values usually meaning a less compact or more uneven shape. Convex hull area measures the area of the smallest convex shape that contains the leaf. Solidity is calculated as leaf area divided by convex hull area, so lower solidity suggests a leaf with more indentations or a less convex shape.
+
+Color features are also extracted from the original color image. After the leaf mask is created, only pixels inside the leaf region are used for color measurement. These RGB values are converted to HSV color space. Hue describes the basic color tone, saturation describes color intensity, and value describes brightness. These color features are not the main focus of the report, but they help show what information is present in the original color image that is not captured by the outline alone.
+
+Together, these processing steps convert a raw leaf image into a set of numerical measurements that can be compared across species.
+
+```{r setup, include=FALSE}
+if (!requireNamespace("magick", quietly = TRUE)) install.packages("magick")
+if (!requireNamespace("tidyverse", quietly = TRUE)) install.packages("tidyverse")
+if (!requireNamespace("BiocManager", quietly = TRUE)) install.packages("BiocManager")
+if (!requireNamespace("EBImage", quietly = TRUE)) BiocManager::install("EBImage", ask = FALSE, update = FALSE)
+library(tidyverse)
+library(magick)
+library(EBImage)
+```
+
+```{r}
+base_path <- "data/raw"
+
+species_info <- data.frame(
+  folder = c("leaf1", "leaf3", "leaf4", "leaf5", "leaf6"),
+  name   = c("Ulmus carpinifolia",
+             "Salix aurita",
+             "Quercus",
+             "Alnus incana",
+             "Betula pubescens"),
+  stringsAsFactors = FALSE
+)
+```
+
+```{r}
+get_leaf_objects <- function(filepath, resize_size = "1200x1200", threshold_value = 200) {
+  img <- image_read(filepath)
+  img_small <- image_resize(img, resize_size)
+
+  gray_img <- image_convert(img_small, colorspace = "gray")
+  gray_arr <- image_data(gray_img, channels = "gray")
+
+  gray_mat <- matrix(
+    as.integer(gray_arr[1, , ]),
+    nrow = dim(gray_arr)[2],
+    ncol = dim(gray_arr)[3]
+  )
+
+  leaf_mask <- gray_mat < threshold_value
+
+  lab <- bwlabel(Image(leaf_mask))
+  tab <- table(as.vector(lab))
+  tab <- tab[names(tab) != "0"]
+
+  if (length(tab) == 0) return(NULL)
+
+  largest_label <- as.numeric(names(tab)[which.max(tab)])
+  leaf_clean <- lab == largest_label
+  leaf_clean <- fillHull(leaf_clean)
+
+  edge <- leaf_clean & !erode(leaf_clean, makeBrush(3, shape = "box"))
+
+  list(
+    img = img_small,
+    gray_mat = gray_mat,
+    mask = as.matrix(leaf_clean) > 0,
+    edge = as.matrix(edge) > 0
+  )
+}
+
+compute_perimeter4 <- function(mask) {
+  mask <- as.matrix(mask) > 0
+
+  padded <- matrix(FALSE, nrow(mask) + 2, ncol(mask) + 2)
+  padded[2:(nrow(mask) + 1), 2:(ncol(mask) + 1)] <- mask
+
+  center <- padded[2:(nrow(mask) + 1), 2:(ncol(mask) + 1)]
+  up     <- padded[1:nrow(mask), 2:(ncol(mask) + 1)]
+  down   <- padded[3:(nrow(mask) + 2), 2:(ncol(mask) + 1)]
+  left   <- padded[2:(nrow(mask) + 1), 1:ncol(mask)]
+  right  <- padded[2:(nrow(mask) + 1), 3:(ncol(mask) + 2)]
+
+  sum(center & !up) +
+    sum(center & !down) +
+    sum(center & !left) +
+    sum(center & !right)
+}
+
+compute_length_width <- function(mask) {
+  coords <- which(mask, arr.ind = TRUE)
+
+  if (nrow(coords) < 3) {
+    return(list(length = NA_real_, width = NA_real_))
+  }
+
+  x <- coords[, 2]
+  y <- coords[, 1]
+
+  pca <- prcomp(cbind(x, y), center = TRUE, scale. = FALSE)
+  scores <- pca$x
+
+  list(
+    length = diff(range(scores[, 1])),
+    width = diff(range(scores[, 2]))
+  )
+}
+
+compute_convex_hull_area <- function(mask) {
+  coords <- which(mask, arr.ind = TRUE)
+
+  if (nrow(coords) < 3) return(NA_real_)
+
+  x <- coords[, 2]
+  y <- coords[, 1]
+  h <- chull(x, y)
+
+  hx <- x[c(h, h[1])]
+  hy <- y[c(h, h[1])]
+
+  0.5 * abs(sum(hx[-1] * hy[-length(hy)] - hx[-length(hx)] * hy[-1]))
+}
+
+compute_shape_features <- function(mask) {
+  area <- sum(mask)
+  perimeter4 <- compute_perimeter4(mask)
+
+  lw <- compute_length_width(mask)
+  leaf_length <- lw$length
+  leaf_width  <- lw$width
+
+  aspect_ratio <- ifelse(
+    is.na(leaf_width) || leaf_width == 0,
+    NA_real_,
+    leaf_length / leaf_width
+  )
+
+  circularity <- ifelse(
+    is.na(perimeter4) || perimeter4 == 0,
+    NA_real_,
+    4 * pi * area / (perimeter4^2)
+  )
+
+  convex_hull_area <- compute_convex_hull_area(mask)
+
+  solidity <- ifelse(
+    is.na(convex_hull_area) || convex_hull_area == 0,
+    NA_real_,
+    area / convex_hull_area
+  )
+
+  compactness <- ifelse(
+    is.na(area) || area == 0,
+    NA_real_,
+    (perimeter4^2) / area
+  )
+
+  data.frame(
+    area = area,
+    perimeter4 = perimeter4,
+    length = leaf_length,
+    width = leaf_width,
+    aspect_ratio = aspect_ratio,
+    circularity = circularity,
+    compactness = compactness,
+    convex_hull_area = convex_hull_area,
+    solidity = solidity
+  )
+}
+
+compute_hsv_features <- function(filepath, mask, resize_size = "1200x1200") {
+  img <- image_read(filepath)
+  img_small <- image_resize(img, resize_size)
+
+  rgb_arr <- image_data(img_small, channels = "rgb")
+
+  R_mat <- matrix(
+    as.integer(rgb_arr[1, , ]),
+    nrow = dim(rgb_arr)[2],
+    ncol = dim(rgb_arr)[3]
+  )
+  G_mat <- matrix(
+    as.integer(rgb_arr[2, , ]),
+    nrow = dim(rgb_arr)[2],
+    ncol = dim(rgb_arr)[3]
+  )
+  B_mat <- matrix(
+    as.integer(rgb_arr[3, , ]),
+    nrow = dim(rgb_arr)[2],
+    ncol = dim(rgb_arr)[3]
+  )
+
+  R_leaf <- R_mat[mask]
+  G_leaf <- G_mat[mask]
+  B_leaf <- B_mat[mask]
+
+  hsv_vals <- rgb2hsv(R_leaf, G_leaf, B_leaf, maxColorValue = 255)
+
+  data.frame(
+    mean_H = mean(hsv_vals["h", ]),
+    mean_S = mean(hsv_vals["s", ]),
+    mean_V = mean(hsv_vals["v", ]),
+    sd_H = sd(hsv_vals["h", ]),
+    sd_S = sd(hsv_vals["s", ]),
+    sd_V = sd(hsv_vals["v", ])
+  )
+}
+```
+
+```{r}
+all_features <- list()
+
+for (i in seq_len(nrow(species_info))) {
+  folder  <- species_info$folder[i]
+  sp_name <- species_info$name[i]
+  sp_path <- file.path(base_path, folder)
+
+  files <- list.files(sp_path, pattern = "\\.tif$", full.names = TRUE, ignore.case = TRUE)
+
+  cat("Processing", sp_name, "-", length(files), "images\n")
+
+  sp_rows <- list()
+
+  for (j in seq_along(files)) {
+    tryCatch({
+      leaf_obj <- get_leaf_objects(files[j])
+
+      if (is.null(leaf_obj)) stop("Mask not found")
+
+      shape_f <- compute_shape_features(leaf_obj$mask)
+      color_f <- compute_hsv_features(files[j], leaf_obj$mask)
+
+      sp_rows[[j]] <- cbind(
+        data.frame(
+          species = sp_name,
+          filename = basename(files[j]),
+          stringsAsFactors = FALSE
+        ),
+        shape_f,
+        color_f
+      )
+    }, error = function(e) {
+      stop("Failed to process ", basename(files[j]), ": ", conditionMessage(e))
+    })
+  }
+
+  all_features[[i]] <- bind_rows(sp_rows)
+  cat("  Completed:", nrow(all_features[[i]]), "images\n")
+}
+
+leaf_data <- bind_rows(all_features)
+leaf_data$species <- factor(leaf_data$species, levels = species_info$name)
+
+cat("\nTotal images processed:", nrow(leaf_data), "\n")
+print(table(leaf_data$species))
+
+if (nrow(leaf_data) != 375) {
+  stop("Not all 375 images were processed. Check skipped files.")
+}
+
+if (!all(table(leaf_data$species) == 75)) {
+  stop("Each species should have exactly 75 images.")
+}
+```
+
+```{r}
+write.csv(leaf_data, "data/leaf_features.csv", row.names = FALSE)
+```
+
+## Outline-Based Feature Analysis
+
+## Summary Statistics
+The summary statistics show that the five species differ in several outline-based features. Ulmus carpinifolia has the largest average area, with a mean area of 414,791.6 pixels. Betula pubescens also has a large average area of 401,073.9 pixels, while Alnus incana has the smallest average area at 253,014.7 pixels. This suggests that area is useful for describing differences in overall leaf size among the selected species.
+
+Perimeter also varies across species. Betula pubescens has the largest average perimeter at 4,806.3 pixels, while Alnus incana has the smallest average perimeter at 3,439.9 pixels. Since perimeter is affected by both leaf size and edge detail, this feature helps describe how much boundary detail each species has.
+
+Aspect ratio provides another important difference. Salix aurita has the highest average aspect ratio at 2.046, followed by Alnus incana at 2.000. This indicates that these species have more elongated shapes. Betula pubescens has the lowest average aspect ratio at 1.445, suggesting a broader leaf shape relative to its length. This makes aspect ratio one of the more useful features for comparing overall leaf proportions.
+
+Circularity and solidity describe compactness and edge shape. Quercus has the lowest average circularity at 0.201, while Ulmus carpinifolia has the highest average circularity at 0.270. Ulmus carpinifolia also has the highest average solidity at 0.940, while Alnus incana has the lowest average solidity at 0.788. These results suggest that Ulmus carpinifolia has a more compact outline, while Alnus incana and Quercus have less compact or more uneven shapes.
+
+```{r}
+leaf_data %>%
+  group_by(species) %>%
+  summarise(
+    n = n(),
+    mean_area = round(mean(area, na.rm = TRUE), 1),
+    mean_perimeter4 = round(mean(perimeter4, na.rm = TRUE), 1),
+    mean_length = round(mean(length, na.rm = TRUE), 1),
+    mean_width = round(mean(width, na.rm = TRUE), 1),
+    mean_aspect_ratio = round(mean(aspect_ratio, na.rm = TRUE), 3),
+    mean_circularity = round(mean(circularity, na.rm = TRUE), 3),
+    mean_solidity = round(mean(solidity, na.rm = TRUE), 3),
+    mean_H = round(mean(mean_H, na.rm = TRUE), 3),
+    mean_S = round(mean(mean_S, na.rm = TRUE), 3),
+    mean_V = round(mean(mean_V, na.rm = TRUE), 3)
+  ) %>%
+  knitr::kable()
+
+leaf_data %>%
+  group_by(species) %>%
+  summarise(
+    mean_Hue = round(mean(mean_H, na.rm = TRUE), 3),
+    mean_Saturation = round(mean(mean_S, na.rm = TRUE), 3),
+    mean_Value = round(mean(mean_V, na.rm = TRUE), 3),
+    sd_Hue = round(mean(sd_H, na.rm = TRUE), 3),
+    sd_Saturation = round(mean(sd_S, na.rm = TRUE), 3),
+    sd_Value = round(mean(sd_V, na.rm = TRUE), 3)
+  ) %>%
+  knitr::kable()
+
+```
+
+```{r}
+ggplot(leaf_data, aes(x = area, fill = species)) +
+  geom_histogram(alpha = 0.5, position = "identity", bins = 25) +
+  theme_minimal() +
+  labs(
+    title = "Distribution of Leaf Area by Species",
+    x = "Area (pixels)",
+    y = "Count",
+    fill = "Species"
+  )
+```
+
+The area plot shows that the species differ in overall leaf size. Ulmus carpinifolia and Betula pubescens tend to have larger leaf areas, while Alnus incana tends to have smaller leaf areas. However, the distributions are not completely separated, so area alone is not enough to identify every species clearly.
+
+```{r}
+ggplot(leaf_data, aes(x = perimeter4, color = species)) +
+  stat_ecdf(geom = "step", linewidth = 1) +
+  theme_minimal() +
+  labs(
+    title = "ECDF of 4-Neighborhood Perimeter by Species",
+    x = "Perimeter (pixels)",
+    y = "ECDF",
+    color = "Species"
+  )
+```
+
+The perimeter ECDF shows a similar pattern. Betula pubescens has the highest average perimeter, while Alnus incana has the lowest. Perimeter is useful because it reflects both size and boundary length, but it is also affected by leaf shape. A leaf with a more complicated edge can have a high perimeter even if its area is not the largest.
+
+Together, area and perimeter provide a basic size profile for each species. They help describe which species tend to have larger leaves and which tend to have smaller leaves, but they need to be combined with shape features for a stronger comparison.
+
+```{r}
+ggplot(leaf_data, aes(x = circularity, fill = species)) +
+  geom_histogram(alpha = 0.5, position = "identity", bins = 25) +
+  theme_minimal() +
+  labs(
+    title = "Distribution of Circularity by Species",
+    x = "Circularity",
+    y = "Count",
+    fill = "Species"
+  )
+```
+
+Circularity compares leaf area to perimeter. A more compact leaf has higher circularity, while a more irregular or elongated leaf tends to have lower circularity. In the summary table, Quercus has the lowest average circularity at 0.201, and Betula pubescens also has a relatively low average circularity at 0.217. This suggests that these species tend to have less compact outlines on average than the others.
+
+Ulmus carpinifolia, Alnus incana, and Salix aurita have higher average circularity values, although the differences are not large enough to make circularity a perfect separator by itself. Circularity is still useful because it captures shape compactness in a way that area and perimeter alone do not.
+
+```{r}
+ggplot(leaf_data, aes(x = species, y = aspect_ratio, fill = species)) +
+  geom_boxplot() +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 35, hjust = 1)) +
+  labs(
+    title = "Aspect Ratio by Species",
+    x = "Species",
+    y = "Aspect Ratio"
+  )
+```
+
+Aspect ratio is one of the clearest outline features for describing leaf proportions. Salix aurita has the highest average aspect ratio at 2.046, and Alnus incana is close behind at 2.000. This suggests that these species tend to have more elongated leaves. In contrast, Betula pubescens has the lowest average aspect ratio at 1.445, meaning that its leaves are broader relative to their length.
+
+This feature is useful because it captures an easy-to-understand biological difference: some leaves are long and narrow, while others are broader. The aspect ratio boxplot and length-versus-width scatterplot help show this difference visually. Even when species overlap in area or perimeter, aspect ratio can still provide useful information about shape.
+
+```{r}
+ggplot(leaf_data, aes(x = species, y = solidity, fill = species)) +
+  geom_boxplot() +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 35, hjust = 1)) +
+  labs(
+    title = "Solidity by Species",
+    x = "Species",
+    y = "Solidity"
+  )
+```
+
+Solidity measures how much of the convex hull is filled by the leaf. A high solidity value suggests that the leaf is more compact and closer to a convex shape, while a lower value suggests more indentations or edge irregularity.
+
+Ulmus carpinifolia has the highest average solidity at 0.940, followed closely by Salix aurita at 0.937. This suggests that these two species have relatively compact outlines. Alnus incana has the lowest average solidity at 0.788, and Quercus also has a lower solidity value of 0.817. This indicates that these species have outlines that fill less of their convex hulls, which may reflect more irregular boundaries.
+
+Solidity is useful because it captures a different kind of shape information than aspect ratio. Aspect ratio describes elongation, while solidity describes how convex or indented the leaf shape is. Using both features together gives a better description than either feature alone.
+
+```{r}
+ggplot(leaf_data, aes(x = length, y = width, color = species)) +
+  geom_point(alpha = 0.6, size = 1.8) +
+  theme_minimal() +
+  labs(
+    title = "Length vs Width by Species",
+    x = "Length",
+    y = "Width",
+    color = "Species"
+  )
+```
+
+The scatterplots suggest that combining features gives a clearer picture than looking at one feature at a time, even though the species are not completely separated. The length-versus-width scatterplot shows how the species differ in overall leaf dimensions. Betula pubescens has the largest average width, while Salix aurita has a high average length relative to width.
+
+```{r}
+ggplot(leaf_data, aes(x = aspect_ratio, y = mean_S, color = species)) +
+  geom_point(alpha = 0.6, size = 1.8) +
+  theme_minimal() +
+  labs(
+    title = "Aspect Ratio vs Mean Saturation by Species",
+    x = "Aspect Ratio",
+    y = "Mean Saturation",
+    color = "Species"
+  )
+```
+
+The aspect ratio versus mean saturation plot combines outline and color information. This plot is useful because it shows that shape and color describe different parts of the leaf image. Species that are similar in one type of feature may differ in another. This supports the idea that species are best characterized and compared when multiple features are considered together.
+
+## What Leaf Outlines Can and Cannot Show
+Leaf outlines can show several important biological features. They capture overall size through area and perimeter, proportions through aspect ratio, compactness through circularity, and edge detail through solidity. These features are useful because the outline of a leaf is one of the most visible and stable differences among species.
+
+In this project, outlines helped describe each species with a different feature pattern. Ulmus carpinifolia tended to be larger and more compact on average. Salix aurita tended to be more elongated while still having relatively high solidity. Quercus tended to have lower circularity, while Alnus incana tended to be smaller and lower in solidity. Betula pubescens tended to be broader relative to its length.
+
+However, outlines also have limitations. A binary outline only describes the outer boundary of the leaf. It does not capture internal vein structure, surface texture, pigmentation, or brightness. Two leaves may have similar outlines but differ in internal structure or color. Also, some outline measurements can be affected by petioles or image orientation. For example, a long petiole can increase measured length and aspect ratio even if the leaf blade itself is not very elongated.
+
+Because of these limits, outline features should be treated as one part of the comparison, not the full description of the species.
+
+## Color Feature Analysis
+Color features were included as an extra part of the analysis. These features were extracted from the pixels inside the leaf mask, which prevents the white background from affecting the measurements. The HSV color summaries describe hue, saturation, and brightness.
+
+The color summary table shows that Salix aurita has the highest average hue at 0.178, while Alnus incana has the lowest average hue at 0.159. Quercus has the highest average saturation at 0.919, followed closely by Salix aurita at 0.911. This suggests that those species have stronger color intensity in the scanned images. Ulmus carpinifolia has the highest average value, or brightness, at 0.348, while Alnus incana has the lowest average brightness at 0.295.
+
+The color features are not as central as the outline features, but they provide useful additional information. They help show why color images can describe a species more fully than a binary outline alone. The outline captures the shape of the leaf, while color features capture information about pigmentation and brightness inside the leaf region.
+
+## Discussion
+The main result of this project is that tree leaf species can be characterized using a combination of interpretable image features derived from leaf outlines and color information.
+
+Area and perimeter describe leaf size. Aspect ratio describes whether the leaf is elongated or broad. Circularity describes compactness, and solidity describes how much the leaf fills its convex hull. These features together provide a useful description of each species.
+
+The results suggest that no single feature is enough to fully characterize and compare all five species. For example, area helps separate large and small leaves, but several species overlap in size. Aspect ratio helps separate elongated and broad leaves, but it does not describe edge complexity. Solidity helps describe compactness and indentations, but it does not describe color or internal structure. This is why the best comparisons come from using several features together.
+
+The analysis also shows why color features can be helpful. Color is not the main focus of the project, but it provides additional information that the outline cannot capture. In controlled scanned images, differences in hue, saturation, and brightness can provide another way to characterize and compare species. However, color can be more sensitive to scanning conditions, leaf age, and lighting, so it should be treated as additional information rather than as the main basis for comparison.
+
+One limitation of the analysis is the use of a fixed threshold value to separate the leaf from the background. This worked for the images used here because the leaves were scanned on a light background, but it may not work as well for images taken under less controlled conditions. Another limitation is that petioles and image orientation may affect length, width, and aspect ratio. These limitations show that feature extraction choices matter and that results should be interpreted carefully.
+
+## Conclusion
+This report analyzed 375 leaf images from five species in the Swedish Leaf dataset. Each image was processed to create a binary leaf mask, and several outline-based features were extracted to compare each species. HSV color features were also computed as extra information from the original color images.
+
+The outline features provided useful species-level differences. Ulmus carpinifolia had the largest average area and highest solidity, Salix aurita had the highest aspect ratio, Quercus had the lowest circularity, Alnus incana had the smallest average area and lowest solidity, and Betula pubescens had the lowest aspect ratio and largest average width.
+
+Overall, the results show that leaf outlines are useful for characterizing and comparing size, proportions, compactness, and edge shape, but they cannot capture everything about a species. Color features add information about pigmentation and brightness that the outline does not contain. This project shows that species are best characterized and compared when multiple meaningful features are measured and interpreted together.
+
+## References
+Söderkvist, O. (2001). Computer Vision Classification of Leaves from Swedish Trees. Linköping University.
