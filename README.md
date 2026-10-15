@@ -4,6 +4,8 @@ I used R to analyze 375 leaf images from five tree species in the Swedish Leaf d
 
 The goal was to understand which features are useful for describing differences between species and where those measurements fall short.
 
+**[View the full analysis and visualizations](https://elijahchiu.github.io/leaf-image-analysis/reports/leaf_analysis.html)**
+
 ## Dataset
 
 The project uses images from the Swedish Leaf Dataset, collected at Linköping University.
